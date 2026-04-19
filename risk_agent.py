@@ -1,17 +1,19 @@
-#self.api_key = "AIzaSyCh3YNb9b0yC2wKhsatwzhj0mDrwBS74Es"
-
 import os
-import json
-import re
+from dotenv import load_dotenv
 import google.generativeai as genai
+
+# Load the variables from the .env file
+load_dotenv()
 
 class RiskAgent:
     def __init__(self):
-        # 1. HARDCODE YOUR KEY HERE
-        self.api_key = "AIzaSyCh3YNb9b0yC2wKhsatwzhj0mDrwBS74Es"
+        # Fetch the key from the environment variable
+        self.api_key = os.getenv("GEMINI_API_KEY")
+        
+        if not self.api_key:
+            raise Exception("API Key not found! Ensure .env file exists with GEMINI_API_KEY.")
+            
         genai.configure(api_key=self.api_key)
-
-        # 2. AUTOMATIC DISCOVERY
         self.model = self._get_latest_model()
 
     def _get_latest_model(self):
