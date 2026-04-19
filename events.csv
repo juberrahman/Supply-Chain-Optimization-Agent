@@ -1,0 +1,7 @@
+Event_ID,Source,Description,Published_Date
+E_001,Reuters,A major labor strike has been confirmed at PORT09. Port authorities report that operations are expected to drop to 70% capacity for the next 72 hours as negotiations stall. ,4/19/2026
+E_002,Internal Email,Urgent: A transformer exploded at PLANT16 this morning. We are declaring a 20% shutdown of the facility until safety inspections are completed. Less orders can be fulfilled from this site. ,4/19/2026
+E_003,SupplyChain247,Regional fuel surcharges have spiked due to local shortages. All freight handled by Carrier V444_6 will see a 40% increase in transport rates effective immediately. ,4/20/2026
+E_004,Local News,Heavy flooding in the industrial zone has restricted access to PLANT03. The plant remains operational but can only run at 60% of its normal daily capacity due to staff shortages. ,4/20/2026
+E_005,Maritime Bulletin,"Congestion at PORT05 is causing significant delays. Carriers are being redirected, and those remaining in the queue are charging a 1.5x congestion fee on all shipments. ",4/21/2026
+E_006,Weather Channel,"A severe storm warning for the coastal region may impact PORT09. We recommend reducing reliance on this hub as a precaution, though it currently remains open. ",4/21/2026

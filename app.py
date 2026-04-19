@@ -1,16 +1,22 @@
 import streamlit as st
 import duckdb
 import pandas as pd
-from pulp import LpProblem, LpMinimize, LpVariable, lpSum, value, LpStatus
+import sys
+import os
+
+# Ensure local modules (risk_agent.py, optimizer.py) are recognized
+sys.path.append(os.path.dirname(__file__))
+
+from risk_agent import RiskAgent
+from optimizer import run_optimization
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="Supply Chain Super Agent", layout="wide")
-st.title("📦 Supply Chain Optimization Agent")
+st.set_page_config(page_title="Agentic Supply Chain Optimizer", layout="wide")
+st.title("🤖 Agentic Supply Chain Optimizer")
 
-# --- DATA LOADING ---
+# --- DATA LOADING (Sanitized for DuckDB) ---
 @st.cache_data
-def get_all_data():
-    """Loads CSV files and ensures numeric columns are correctly typed."""
+def load_all_data():
     files = {
         "orders": "data/OrderList.csv",
         "freight": "data/FreightRates.csv",
@@ -19,24 +25,18 @@ def get_all_data():
         "product_mapping": "data/ProductsPerPlant.csv",
         "wh_costs": "data/WhCosts.csv"
     }
-    
     data = {}
     for table, path in files.items():
         try:
-            df = pd.read_csv(path)
-            # Clean headers: remove trailing/leading spaces
+            df = pd.read_csv(path, dtype=str) 
             df.columns = df.columns.str.strip()
-            # Clean string values
-            df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
-            
-            # Pre-emptive numeric conversion
-            if 'Weight' in df.columns: df['Weight'] = pd.to_numeric(df['Weight'], errors='coerce')
-            if 'Unit quantity' in df.columns: df['Unit quantity'] = pd.to_numeric(df['Unit quantity'], errors='coerce')
-            if 'minm_wgh_qty' in df.columns: df['minm_wgh_qty'] = pd.to_numeric(df['minm_wgh_qty'], errors='coerce')
-            if 'max_wgh_qty' in df.columns: df['max_wgh_qty'] = pd.to_numeric(df['max_wgh_qty'], errors='coerce')
-            if 'Daily Capacity' in df.columns: df['Daily Capacity'] = pd.to_numeric(df['Daily Capacity'], errors='coerce')
-            if 'Cost/unit' in df.columns: df['Cost/unit'] = pd.to_numeric(df['Cost/unit'], errors='coerce')
-            
+            for col in df.columns:
+                # Remove common data formatting issues
+                df[col] = df[col].str.strip().str.replace(',', '', regex=False).str.replace('$', '', regex=False)
+                numeric_cols = ['Weight', 'Unit quantity', 'minm_wgh_qty', 'max_wgh_qty', 
+                               'Daily Capacity', 'Cost/unit', 'minimum cost', 'rate']
+                if col in numeric_cols:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
             data[table] = df
         except Exception as e:
             st.error(f"Error reading {path}: {e}")
@@ -44,38 +44,60 @@ def get_all_data():
     return data
 
 # Initialize Database
-all_data = get_all_data()
+db_tables = load_all_data()
 con = duckdb.connect(database=':memory:')
-for table_name, df in all_data.items():
-    con.register(table_name, df)
+for name, df in db_tables.items():
+    con.register(name, df)
 
-# --- SIDEBAR: ORDER SELECTION ---
-st.sidebar.header("Order Management")
-order_list = con.execute("SELECT DISTINCT \"Order ID\" FROM orders").df()["Order ID"].tolist()
-selected_order_id = st.sidebar.selectbox("Select an Order ID", order_list)
+# --- SIDEBAR ---
+with st.sidebar:
+    st.header("Disruption Source")
+    # Using a key for file uploader to maintain state
+    event_file = st.file_uploader("Upload Events (CSV/JSON)", type=['csv', 'json'], key="event_uploader")
+    st.divider()
+    st.info("Agent Status: Active (Discovery Mode)")
 
-if selected_order_id:
-    # 1. Fetch Order Details
-    order_info = con.execute(f"SELECT * FROM orders WHERE \"Order ID\" = {selected_order_id}").df().iloc[0]
+# --- MAIN UI ---
+# Sort IDs to ensure consistent index mapping in the selectbox
+order_ids = sorted(con.execute("SELECT DISTINCT \"Order ID\" FROM orders").df()["Order ID"].tolist())
+
+# Added key="selected_order_id" to prevent the app from resetting the choice on rerun
+selected_id = st.selectbox("🎯 Select Order ID to Route", order_ids, key="selected_order_id")
+
+if selected_id:
+    # 1. Get primary order info
+    order_info = con.execute(f"SELECT * FROM orders WHERE \"Order ID\" = {selected_id}").df().iloc[0]
     
-    st.subheader(f"Current Order: {selected_order_id}")
+    # 2. RAG CONTEXT: Fetch routing facts for the AI
+    db_context_df = con.execute(f"""
+        SELECT pm."Plant Code", pp.Port, f.Carrier
+        FROM product_mapping pm
+        JOIN plant_ports pp ON pm."Plant Code" = pp."Plant Code"
+        JOIN freight f ON pp.Port = f.orig_port_cd
+        WHERE pm."Product ID" = {order_info["Product ID"]}
+        AND f.dest_port_cd = '{order_info["Destination Port"]}'
+        LIMIT 1
+    """).df()
+    
+    # Safety check for empty database results
+    if not db_context_df.empty:
+        routing_context = db_context_df.to_dict('records')
+    else:
+        routing_context = [{"Plant Code": "N/A", "Port": "N/A", "Carrier": "N/A"}]
+
+    st.subheader(f"Current Order: {selected_id}")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Product ID", order_info["Product ID"])
     m2.metric("Destination", order_info["Destination Port"])
     m3.metric("Qty", int(order_info["Unit quantity"]))
     m4.metric("Weight", f"{order_info['Weight']} kg")
 
-    # 2. SQL JOIN: Find Physical Paths
-    feasible_query = f"""
+    # --- SQL FOR OPTIMIZATION ---
+    base_query = f"""
     SELECT 
-        pm."Plant Code" as plant,
-        pp.Port as origin_port,
-        f.Carrier,
-        f.mode_dsc,
-        CAST(c."Daily Capacity" AS DOUBLE) as capacity,
-        CAST(wh."Cost/unit" AS DOUBLE) as wh_cost,
-        CAST(REPLACE(REPLACE(f."minimum cost", '$', ''), ' ', '') AS DOUBLE) as min_f,
-        CAST(REPLACE(REPLACE(f.rate, '$', ''), ' ', '') AS DOUBLE) as rate_f
+        pm."Plant Code" as plant, pp.Port as origin_port, f.Carrier, f.mode_dsc,
+        c."Daily Capacity" as capacity, wh."Cost/unit" as wh_cost,
+        f."minimum cost" as min_f, f.rate as rate_f
     FROM product_mapping pm
     JOIN plant_ports pp ON pm."Plant Code" = pp."Plant Code"
     JOIN freight f ON pp.Port = f.orig_port_cd
@@ -83,70 +105,90 @@ if selected_order_id:
     JOIN wh_costs wh ON pm."Plant Code" = wh.WH
     WHERE pm."Product ID" = {order_info["Product ID"]}
       AND f.dest_port_cd = '{order_info["Destination Port"]}'
-      AND CAST({order_info["Weight"]} AS DOUBLE) BETWEEN CAST(f.minm_wgh_qty AS DOUBLE) AND CAST(f.max_wgh_qty AS DOUBLE)
+      AND {order_info["Weight"]} BETWEEN f.minm_wgh_qty AND f.max_wgh_qty
     """
-    
-    # We define routes_df here before checking if it's empty
-    routes_df = con.execute(feasible_query).df().drop_duplicates()
+    baseline_routes = con.execute(base_query).df().drop_duplicates()
 
-    if routes_df.empty:
-        st.warning(f"No feasible route for weight {order_info['Weight']} to {order_info['Destination Port']}. Check weight brackets in FreightRates.csv.")
-    else:
-        st.write("### Eligible Supply Chain Paths")
-        st.dataframe(routes_df, use_container_width=True)
-        
-        # --- PULP SOLVER ---
-        prob = LpProblem("Route_Optimization", LpMinimize)
-        route_vars = LpVariable.dicts("Route", routes_df.index, cat="Binary")
-        
-        # OBJECTIVE: Min(Warehouse Cost + Freight Cost)
-        route_costs = []
-        for i, row in routes_df.iterrows():
-            f_total = max(row['min_f'], row['rate_f'] * order_info['Weight'])
-            w_total = row['wh_cost'] * order_info['Unit quantity']
-            route_costs.append(f_total + w_total)
-        
-        prob += lpSum([route_vars[i] * route_costs[i] for i in routes_df.index])
-        prob += lpSum([route_vars[i] for i in routes_df.index]) == 1 
-        
-        # Attempt Capacity Constraint
-        for i, row in routes_df.iterrows():
-            prob += route_vars[i] * order_info['Unit quantity'] <= row['capacity']
-            
-        prob.solve()
-        
-        # Smart Logic: If Capacity fails, solve for Cost only but warn the user
-        is_violation = False
-        if LpStatus[prob.status] != 'Optimal':
-            is_violation = True
-            # Solve again without capacity constraint
-            prob = LpProblem("Min_Cost_Only", LpMinimize)
-            prob += lpSum([route_vars[i] * route_costs[i] for i in routes_df.index])
-            prob += lpSum([route_vars[i] for i in routes_df.index]) == 1
-            prob.solve()
-        
-        if LpStatus[prob.status] == 'Optimal':
-            best_idx = [i for i in routes_df.index if value(route_vars[i]) == 1][0]
-            winner = routes_df.iloc[best_idx]
-            
-            if is_violation:
-                st.warning(f"⚠️ **Capacity Shortfall:** Cheapest route shown, but order exceeds {winner['plant']} capacity.")
-            else:
-                st.success(f"✨ Optimal Route Found: **{winner['plant']}** via **{winner['origin_port']}**")
-            
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.write("**Carrier Info**")
-                st.write(f"Carrier: {winner['Carrier']}")
-                st.write(f"Service: {winner['mode_dsc']}")
-            with c2:
-                st.write("**Cost Breakdown**")
-                st.write(f"Warehouse: ${winner['wh_cost'] * order_info['Unit quantity']:,.2f}")
-                st.write(f"Freight: ${max(winner['min_f'], winner['rate_f'] * order_info['Weight']):,.2f}")
-            with c3:
-                st.metric("Total Cost", f"${value(prob.objective):,.2f}")
+    col_left, col_right = st.columns(2)
+
+    # LEFT COLUMN: BASELINE
+    with col_left:
+        st.subheader("⚪ Baseline Routing")
+        if baseline_routes.empty:
+            st.warning("No physical routes found.")
         else:
-            st.error("Error calculating routes.")
+            winners, cost, viol, msg = run_optimization(baseline_routes.copy(), order_info)
+            if winners:
+                st.metric("Standard Total Cost", f"${cost:,.2f}")
+                for r in winners:
+                    st.write(f"✅ **{r['plant']}** via **{r['Carrier']}** ({int(r['assigned_qty'])} units)")
+                if viol: st.warning("⚠️ Capacity exceeded in baseline.")
+            else:
+                st.error(msg)
+
+    # RIGHT COLUMN: AGENTIC
+    with col_right:
+        st.subheader("🔴 Agentic Routing (AI-Adjusted)")
+        if event_file:
+            # --- INITIALIZE AGENT DATA ---
+            events_df = pd.read_csv(event_file) if 'csv' in event_file.name else pd.read_json(event_file)
+            agent = RiskAgent()
+            full_text = " ".join(events_df['Description'].astype(str).tolist())
+
+            # --- STEP A: REASONING SUMMARY ---
+            with st.spinner("Gemini is checking database facts..."):
+                summary = agent.summarize_risks(full_text, selected_id, routing_context)
+                st.info(f"**AI Risk Analysis:**\n\n{summary}")
+
+            # --- STEP B: AI MAPPING ---
+            with st.spinner("Extracting multipliers..."):
+                disruption_json = agent.parse_events(full_text)
+            
+            st.write("Review AI Multipliers:")
+            # key="risk_editor" ensures the table doesn't refresh unexpectedly
+            reviewed_disruptions = st.data_editor(disruption_json, num_rows="dynamic", key="risk_editor")
+            
+            if st.button("Apply AI Constraints & Re-Route", key="apply_reroute_btn"):
+                # 1. Start with a fresh copy and force Float types to prevent TypeError
+                adjusted_df = baseline_routes.copy()
+                for col_name in ['capacity', 'rate_f', 'wh_cost']:
+                    adjusted_df[col_name] = pd.to_numeric(adjusted_df[col_name], errors='coerce').astype(float)
+                
+                # 2. APPLY MULTIPLIERS
+                # Convert the editor result to a DataFrame for stable iteration
+                for _, disruption in pd.DataFrame(reviewed_disruptions).iterrows():
+                    target_id = str(disruption['target_id']).strip()
+                    cap_mult = float(disruption.get('capacity_multiplier', 1.0))
+                    cost_mult = float(disruption.get('cost_multiplier', 1.0))
+                    
+                    if disruption['target_type'] == 'plant':
+                        mask = adjusted_df['plant'] == target_id
+                        adjusted_df.loc[mask, 'capacity'] *= cap_mult
+                        adjusted_df.loc[mask, 'wh_cost'] *= cost_mult
+                    
+                    elif disruption['target_type'] == 'port':
+                        mask = adjusted_df['origin_port'] == target_id
+                        adjusted_df.loc[mask, 'capacity'] *= cap_mult
+                        adjusted_df.loc[mask, 'rate_f'] *= cost_mult
+                    
+                    elif disruption['target_type'] == 'carrier':
+                        mask = adjusted_df['Carrier'] == target_id
+                        adjusted_df.loc[mask, 'rate_f'] *= cost_mult
+
+                # 3. RUN OPTIMIZATION
+                winners_a, cost_a, viol_a, msg_a = run_optimization(adjusted_df, order_info)
+                
+                if winners_a:
+                    delta = cost_a - cost
+                    st.metric("Adjusted Total Cost", f"${cost_a:,.2f}", delta=f"${delta:,.2f}", delta_color="inverse")
+                    for ra in winners_a:
+                        st.write(f"🚀 **{ra['plant']}** via **{ra['Carrier']}** ({int(ra['assigned_qty'])} units)")
+                else:
+                    # Provide helpful context for feasibility failure
+                    total_cap = adjusted_df['capacity'].sum()
+                    st.error(f"Fulfillment Infeasible. Total Capacity: {total_cap} | Required: {order_info['Unit quantity']}")
+        else:
+            st.info("Upload `events.csv` to activate Agentic routing.")
 
 st.divider()
-st.caption("Agent Status: Online | Logic: SQL Joins + PuLP Optimization")
+st.caption("Supply Chain Agent v2.8 | Stable State & Multi-Type Adjustment Enabled")
