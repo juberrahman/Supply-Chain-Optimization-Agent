@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Load the variables from the .env file
+# Load the variables from the .env 
 load_dotenv()
 
 class RiskAgent:
