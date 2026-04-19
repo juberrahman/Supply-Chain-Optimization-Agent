@@ -10,7 +10,7 @@ class RiskAgent:
     def __init__(self):
         # 1. Try to get key from Streamlit Secrets (Cloud)
         # 2. Fallback to Environment Variables (Local .env)
-        self.api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        self.api_key = st.Secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         
         if not self.api_key:
             st.error("🔑 API Key missing! Please check Streamlit Secrets or your .env file.")
