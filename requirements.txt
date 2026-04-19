@@ -2,3 +2,5 @@ streamlit
 duckdb
 pandas
 pulp
+google-generativeai
+python-dotenv
