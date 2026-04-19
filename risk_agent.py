@@ -1,20 +1,28 @@
 import os
+import streamlit as st
 from dotenv import load_dotenv
 import google.generativeai as genai
 
-# Load the variables from the .env 
+# Load local .env if it exists (for local dev)
 load_dotenv()
 
 class RiskAgent:
     def __init__(self):
-        # Fetch the key from the environment variable
-        self.api_key = os.getenv("GEMINI_API_KEY")
+        # 1. Try to get key from Streamlit Secrets (Cloud)
+        # 2. Fallback to Environment Variables (Local .env)
+        self.api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         
         if not self.api_key:
-            raise Exception("API Key not found! Ensure .env file exists with GEMINI_API_KEY.")
+            st.error("🔑 API Key missing! Please check Streamlit Secrets or your .env file.")
+            st.stop()
             
         genai.configure(api_key=self.api_key)
-        self.model = self._get_latest_model()
+        
+        try:
+            self.model = self._get_latest_model()
+        except Exception as e:
+            # Provide more detail if the key is invalid
+            raise Exception(f"Model discovery failed. Check if your API key is valid. Error: {e}")
 
     def _get_latest_model(self):
         """Finds the newest available Gemini model on your account."""
